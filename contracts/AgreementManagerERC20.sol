@@ -1,4 +1,4 @@
-pragma solidity ^0.5.0;
+pragma solidity 0.5.3;
 
 import "./SafeUtils.sol";
 import "./ERC20Interface.sol";
@@ -53,7 +53,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // Swap means A gets B's deposit and vice versa
     // FiftyFifty means each stake is split evenly between A and B.
     enum PredefinedResolution { None, Refund, EverythingToA, EverythingToB, Swap, FiftyFifty }
-    uint constant nStandardResolutionTypes = 5;
+    uint constant NUM_STANDARD_RESOLUTION_TYPES = 5;
 
     // ---------------------------------
     // Offsets for AgreementData.boolValues
@@ -361,27 +361,38 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     }
 
     // Returns true if party A and party B have entered the same resolution.
-    function partyResolutionsAreEqual(AgreementData storage agreement) internal view returns (bool){
-        return resolutionsAreEqual(
+    function partyResolutionsAreCompatible(AgreementData storage agreement) internal view returns (bool){
+        return resolutionsAreCompatible(
             agreement, agreement.partyAResolutionTokenA, agreement.partyAResolutionTokenB,
-            agreement.partyBResolutionTokenA, agreement.partyBResolutionTokenB);
+            agreement.partyBResolutionTokenA, agreement.partyBResolutionTokenB, A);
     }
 
-    // Returns whether two given resolutions are equal. (resA, resB) is one resolution, (otherA, otherB) is the other.
+    // Returns whether two given resolutions are compatible, a.k.a. not disagreeing in a selfish direction. 
+    // (resA, resB) is one resolution, (otherA, otherB) is the other.
     // The first component of each is for party A's staked token, the second component is for party B's staked token.
+    // resParty is the party corresponding to resA and resB.
     // The logic here is nontrivial because of token A and token B are the same, then the same resolution can be 
     // represented in many different ways.
-    function resolutionsAreEqual(AgreementData storage agreement, uint resA, uint resB, uint otherA, uint otherB) internal view returns (bool){
+    // This assumes neither resolution is RESOLUTION_NULL
+    function resolutionsAreCompatible(AgreementData storage agreement, uint resA, uint resB, uint otherA, uint otherB, uint resParty) 
+        internal view returns (bool){
+
         if(agreement.partyAToken != agreement.partyBToken){
-            return resA == otherA && resB == otherB;
+            if(resParty == A){
+                return resA <= otherA && resB <= otherB;
+            }else{
+                return resA >= otherA && resB >= otherB;
+            }
         }
-        // before we do the math below check the null case, otherwise math overflow
-        if(resA == RESOLUTION_NULL || otherA == RESOLUTION_NULL){
-            return resA == otherA;
+        
+        // now we know tokens are the same 
+        uint resSum = add(resolutionToWei(resA, agreement.partyATokenPower), resolutionToWei(resB, agreement.partyBTokenPower));
+        uint otherSum = add(resolutionToWei(otherA, agreement.partyATokenPower), resolutionToWei(otherB, agreement.partyBTokenPower));
+        if(resParty == A){
+            return resSum <= otherSum;
+        }else{
+            return resSum >= otherSum;
         }
-        // now we know tokens are the same and neither resolution is null
-        return add(resolutionToWei(resA, agreement.partyATokenPower), resolutionToWei(resB, agreement.partyBTokenPower)) ==
-            add(resolutionToWei(otherA, agreement.partyATokenPower), resolutionToWei(otherB, agreement.partyBTokenPower));
     }
 
     // Requires that the caller be party A or party B. Returns whichever party the caller is.
@@ -551,7 +562,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
             return agreement.disputeFee;
         }
         
-        // Beyond this point we know that both parties paid the full arbitration fee.
+        // Beyond this point we know that both parties paid the full arbitration fee. So they both resolved.
 
         // If the arbitrator didn't resolve or withdraw, that means they weren't paid. 
         // And they can never be paid, because we'll only call this function after a final resolution
@@ -564,12 +575,12 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
         // the full arbitration fee. So party A and party B only have a single arbitration fee to split
         // between themselves. We need to figure out how to split up that fee.
         
-        // If A and B have the same resolution, then whichever of them resolved to this value the latest 
-        // should have to pay the full fee (because if they had resolved to it earlier, the arbitrator would
+        // If A and B have a compatible resolution, then whichever of them resolved the latest 
+        // should have to pay the full fee (because if they had resolved earlier, the arbitrator would
         // never have had to be called). See comments for PARTY_A_RESOLVED_LAST
-        if(resolutionsAreEqual(
+        if(resolutionsAreCompatible(
             agreement, agreement.partyAResolutionTokenA, agreement.partyAResolutionTokenB,
-            agreement.partyBResolutionTokenA, agreement.partyBResolutionTokenB)){
+            agreement.partyBResolutionTokenA, agreement.partyBResolutionTokenB, A)){
             if(partyResolvedLast(agreement, party)){
                 return 0;
             }else{
@@ -577,18 +588,18 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
             }
         }
 
-        // Beyond this point we know A and B's resolutions are different. If either of them
-        // agree with the arbiter they should get a refund, leaving the other person with nothing.
+        // Beyond this point we know A and B's resolutions are incompatible. If either of them
+        // are compatible with the arbiter they should get a refund, leaving the other person with nothing.
         (uint resA, uint resB) = partyResolution(agreement, party);
-        if(resolutionsAreEqual(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB)){
+        if(resolutionsAreCompatible(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB, party)){
             return agreement.disputeFee;
         }
         (resA, resB) = partyResolution(agreement, otherParty);
-        if(resolutionsAreEqual(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB)){
+        if(resolutionsAreCompatible(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB, otherParty)){
             return 0;
         }
 
-        // A and B's resolutions are different but unequal to the overall resolution. 
+        // A and B's resolutions are incompatible with each other and with the overall resolution. 
         // Neither party was "right", so they can both split the dispute fee.
         return agreement.disputeFee/2;
     }
@@ -609,15 +620,16 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
             return arbData.weiPaidIn[party];
         }
         
-        // Beyond this point we know the arbitrator has been paid. So party A and party B only have a single arbitration 
+        // Beyond this point we know the arbitrator has been paid (so both paties have resolved).
+        // So party A and party B only have a single arbitration 
         // fee to split between themselves. We need to figure out how to split up that fee.
         
-        // If A and B have the same resolution, then whichever of them resolved to this value the latest 
-        // should have to pay the full fee (because if they had resolved to it earlier, the arbitrator would
+        // If A and B have a compatible resolution, then whichever of them resolved latest 
+        // should have to pay the full fee (because if they had resolved earlier, the arbitrator would
         // never have had to be called). See comments for PARTY_A_RESOLVED_LAST
-        if(resolutionsAreEqual(
+        if(resolutionsAreCompatible(
             agreement, agreement.partyAResolutionTokenA, agreement.partyAResolutionTokenB,
-            agreement.partyBResolutionTokenA, agreement.partyBResolutionTokenB)){
+            agreement.partyBResolutionTokenA, agreement.partyBResolutionTokenB, A)){
             if(partyResolvedLast(agreement, party)){
                 return sub(arbData.weiPaidIn[party], arbData.weiPaidToArbitrator);
             }else{
@@ -625,18 +637,18 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
             }
         }
 
-        // Beyond this point we know A and B's resolutions are different. If either of them
-        // agree with the arbiter they should get a refund, leaving the other person with nothing.
+        // Beyond this point we know A and B's resolutions are incompatible. If either of them
+        // are compatible with the arbiter they should get a refund, leaving the other person with nothing.
         (uint resA, uint resB) = partyResolution(agreement, party);
-        if(resolutionsAreEqual(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB)){
+        if(resolutionsAreCompatible(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB, party)){
             return arbData.weiPaidIn[party]; 
         }
         (resA, resB) = partyResolution(agreement, otherParty);
-        if(resolutionsAreEqual(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB)){
+        if(resolutionsAreCompatible(agreement, resA, resB, agreement.resolutionTokenA, agreement.resolutionTokenB, otherParty)){
             return sub(arbData.weiPaidIn[party], arbData.weiPaidToArbitrator); 
         }
 
-        // A and B's resolutions are different but unequal to the overall resolution. 
+        // A and B's resolutions are incompatible with each other and the overall resolution. 
         // Neither party was "right", so they can both split the dispute fee.
         return sub(arbData.weiPaidIn[party], arbData.weiPaidToArbitrator/2);
     }
@@ -704,19 +716,30 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
         }
     }
 
-    // ------------------------------------------------------------------
-    // public getter functions 
+    // ---------------------------------
+    // -------- constructor
+    // --------------------------------
+
+    constructor() public {
+        // We don't want agreementID 0 to be valid, since the map of disputeIDs to agreementIDs will map
+        // to 0 if the dispute ID doesn't exist.
+        AgreementData memory dummyAgreement;
+        agreements.push(dummyAgreement);
+    }
+
+    // -----------------------------------------------------------------
+    // ----------  getter functions ------------------------------------
     // -----------------------------------------------------------------
 
-    function getResolutionNull() public pure returns (uint, uint){
+    function getResolutionNull() external pure returns (uint, uint){
         return (resolutionToWei(RESOLUTION_NULL, 0), resolutionToWei(RESOLUTION_NULL, 0));
     }
-    function getNumberOfAgreements() public view returns (uint){
+    function getNumberOfAgreements() external view returns (uint){
         return agreements.length;
     }
 
     // Return a bunch of arrays representing the entire state of the agreement. 
-    function getState(uint agreementID) public view 
+    function getState(uint agreementID) external view 
         returns (address[6] memory, uint[23] memory, bool[11] memory, bytes memory){
         if(agreementID >= agreements.length){
             address[6] memory zeroAddrs;
@@ -778,15 +801,8 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     }
 
     // ----------------------------------------------------------------------
-    // -------- public functions --------------------------------------------
+    // --------main external/public functions -------------------------------
     // ----------------------------------------------------------------------
-
-    constructor() public {
-        // We don't want agreementID 0 to be valid, since the map of disputeIDs to agreementIDs will map
-        // to 0 if the dispute ID doesn't exist.
-        AgreementData memory dummyAgreement;
-        agreements.push(dummyAgreement);
-    }
 
     /// Adds a new agreement to the agreements array, returns the agreementID.
     // This is only callable by partyA. So the caller needs to rearrange addresses so that they're partyA.
@@ -820,11 +836,11 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // arbExtraData: Data to pass in to ERC792 arbitrator if a dispute is ever created. 
     function createAgreementA(
         bytes32 agreementHash,
-        string memory agreementURI, 
-        address[6] memory addresses, 
-        uint[13] memory quantities, 
+        string calldata agreementURI, 
+        address[6] calldata addresses, 
+        uint[13] calldata quantities, 
         uint flags, 
-        bytes memory arbExtraData) public payable returns (uint) {
+        bytes calldata arbExtraData) external payable returns (uint) {
 
         require(msg.sender == addresses[0], "Only party A can call createAgreementA.");
         require(
@@ -898,7 +914,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
 
     // Called by PartyB to deposit their stake, locking in the agreement.
     // PartyA already deposited funds in createAgreementA, so we only need a deposit function for partyB.
-    function depositB(uint agreementID) public payable onlyOpen(agreementID) {
+    function depositB(uint agreementID) external payable onlyOpen(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(msg.sender == agreement.partyBAddress, "Function can only be called by party B.");
@@ -917,7 +933,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // Called to report a resolution of the agreement by a party. 
     // resTokenA is the amount of party A's stake that would go to party A (the rest would go to party B).
     // resTokenB is the amount of party B's stake that would go to party A (the rest would go to party B).
-    function resolveAsParty(uint agreementID, uint resTokenA, uint resTokenB) public onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function resolveAsParty(uint agreementID, uint resTokenA, uint resTokenB) external onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on.");
@@ -940,10 +956,10 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
 
         (uint otherResA, uint otherResB) = partyResolution(agreement, otherParty);
 
-        // If A and B's resolutions are the same, set the official resolution to this value.
+        // If A and B's resolutions are compatible, set the official resolution to this value.
         // Or set the resolution to the caller's preference if they give all funds to
         // the other person. 
-        if(otherResA != RESOLUTION_NULL && resolutionsAreEqual(agreement, resA, resB, otherResA, otherResB) ||
+        if(otherResA != RESOLUTION_NULL && resolutionsAreCompatible(agreement, resA, resB, otherResA, otherResB, party) ||
             party == A && resA == 0 && resB == 0 ||
             party == B && resA == agreement.partyAStakeAmount && resB == agreement.partyBStakeAmount){
             
@@ -954,7 +970,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
 
     // Called by arbitrator to report their resolution. See resolveAsParty comments for resolution interpretation.
     // Can only be called after arbitrator is asked to arbitrate by both parties.
-    function resolveAsArbitrator(uint agreementID, uint resTokenA, uint resTokenB) public onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function resolveAsArbitrator(uint agreementID, uint resTokenA, uint resTokenB) external onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         uint48 resA = toLargerUnit(resTokenA, agreement.partyATokenPower);
@@ -988,7 +1004,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
         ArbitrationData storage arbData = arbitrationDataForAgreement[agreementID];
         
         require(arbData.disputeCreated, "Arbitration not requested.");
-        require(ruling <= nStandardResolutionTypes, "Ruling out of range.");
+        require(ruling <= NUM_STANDARD_RESOLUTION_TYPES, "Ruling out of range.");
         
         setArbitratorResolved(agreement, true);
 
@@ -1023,7 +1039,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // If A calls createAgreementA but B is delaying in calling depositB, A can get their funds back 
     // by calling earlyWithdrawA. This closes the agreement to further deposits. A or B would have to
     // call createAgreementA again if they still wanted to do an agreement.
-    function earlyWithdrawA(uint agreementID) public onlyOpen(agreementID) {
+    function earlyWithdrawA(uint agreementID) external onlyOpen(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(msg.sender == agreement.partyAAddress, "withdrawA can only be called by party A.");
@@ -1040,7 +1056,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
 
     // This can only be called after a resolution is established (enforced by onlyClosed and onlyLockedIn)
     // Each party calls this to withdraw the funds they're entitled to, based on the resolution.
-    function withdraw(uint agreementID) public onlyClosed(agreementID) onlyLockedIn(agreementID) {
+    function withdraw(uint agreementID) external onlyClosed(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on");
@@ -1080,7 +1096,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // Request 'simple' (non- ERC792) arbitration. Both parties must call this (and pay the required fee) before
     // the arbitrator is allowed to rule. If one party calls this and the other refuses to, the party who called
     // this function can eventually call requestDefaultJudgment. 
-    function requestArbitration(uint agreementID) public payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function requestArbitration(uint agreementID) external payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         uint party = getParty(agreement);
@@ -1093,6 +1109,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
         }
 
         require(!usingArbitrationStandard(agreement), "Only simple arbitration uses requestArbitration.");
+        require(agreement.arbitratorAddress != address(0), "Arbitration is disallowed.");
         require(!partyResolutionIsNull(agreement, party), "Need to enter a resolution before requesting arbitration.");
         require(!partyRequestedArbitration(agreement, party), "This party already requested arbitration.");
         require(!firstArbitrationRequest || block.timestamp > agreement.nextArbitrationStepAllowedAfterTimestamp, 
@@ -1113,11 +1130,12 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // The logic of this function is somewhat tricky, because fees can rise in between the time that the two parties call
     // this. Both parties must call this before the arbitrator is allowed to rule.
     // We allow parties to overpay this fee if they like, to be ready for any possible fee increases.
-    function requestStandardArbitration(uint agreementID) public payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function requestStandardArbitration(uint agreementID) external payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on..");
         require(usingArbitrationStandard(agreement), "Only standard arbitration uses requestStandardArbitration.");
+        require(agreement.arbitratorAddress != address(0), "Arbitration is disallowed.");
 
         // Make sure people don't accidentally send ETH when the only required tokens are ERC20
         if(agreement.arbitratorToken != address(0)){
@@ -1150,7 +1168,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
             // Both parties have paid at least the arbitrationFee, so create a dispute.
             arbData.disputeCreated = true;
             arbData.weiPaidToArbitrator = arbitrationFee;
-            arbData.disputeID = createDispute_Untrusted(agreement, nStandardResolutionTypes,
+            arbData.disputeID = createDispute_Untrusted(agreement, NUM_STANDARD_RESOLUTION_TYPES,
                 arbitrationExtraData[agreementID], arbitrationFee);
             disputeToAgremeentID[agreement.arbitratorAddress][arbData.disputeID] = agreementID;
             emit Dispute(Arbitrator(agreement.arbitratorAddress), arbData.disputeID, agreementID);
@@ -1171,12 +1189,12 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // Allow the arbitrator to indicate they're working on the dispute by withdrawing the funds.
     // We can't prevent dishonest arbitrator from taking funds without doing work, because they can
     // always call 'rule' quickly. So just avoid the case where we send funds to a nonresponsive arbitrator.
-    function withdrawDisputeFee(uint agreementID) public onlyLockedIn(agreementID) {
+    function withdrawDisputeFee(uint agreementID) external onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!usingArbitrationStandard(agreement), "Only simple arbitration uses withdrawDisputeFee.");
         require(partyRequestedArbitration(agreement, A) && partyRequestedArbitration(agreement, B), "Arbitration not requested");
-        require(!partyResolutionsAreEqual(agreement) || partyResolutionIsNull(agreement, A), "Parties already resolved their dispute");
+        require(!partyResolutionsAreCompatible(agreement), "Parties already resolved their dispute");
         require(msg.sender == agreement.arbitratorAddress, "withdrawDisputeFee can only be called by Arbitrator.");
         require(!arbitratorWithdrewDisputeFee(agreement), "Already withdrew dispute fee.");
 
@@ -1188,7 +1206,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
 
     // If the other person hasn't paid their arbitration fee in time, this function allows the caller to cause 
     // the agreement to be resolved in their favor without the arbitrator getting involved. 
-    function requestDefaultJudgment(uint agreementID) public onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function requestDefaultJudgment(uint agreementID) external onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on.");
@@ -1207,7 +1225,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
 
     // If enough time has elapsed, either party can trigger auto-resolution (if it's enabled) by calling this function,
     // provided that neither party has requested arbitration yet.
-    function requestAutomaticResolution(uint agreementID) public onlyOpen(agreementID) onlyLockedIn(agreementID) { 
+    function requestAutomaticResolution(uint agreementID) external onlyOpen(agreementID) onlyLockedIn(agreementID) { 
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on.");
@@ -1223,7 +1241,7 @@ contract AgreementManagerERC20 is SafeUtils, Arbitrable, EvidenceProducer{
     // Allows either party to record evidence on the blockchain, in case off-chain communication breaks down.
     // If we're using the ERC792 arbitration standard, parties can only submit evidence during a dispute.
     // If we're using simple arbitration, parties can submit evidence whenever.
-    function submitEvidence(uint agreementID, string memory evidence) public onlyOpen(agreementID) {
+    function submitEvidence(uint agreementID, string calldata evidence) external onlyOpen(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(msg.sender == agreement.partyAAddress || msg.sender == agreement.partyBAddress, "Unauthorized sender.");

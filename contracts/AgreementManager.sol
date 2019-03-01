@@ -1,4 +1,4 @@
-pragma solidity ^0.5.0;
+pragma solidity 0.5.3;
 
 import "./SafeUtils.sol";
 import "./Arbitrable.sol";
@@ -45,7 +45,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // Swap means A gets B's deposit and vice versa
     // FiftyFifty means the sum of stakes is split evenly between A and B.
     enum PredefinedResolution { None, Refund, EverythingToA, EverythingToB, Swap, FiftyFifty }
-    uint constant nStandardResolutionTypes = 5;
+    uint constant NUM_STANDARD_RESOLUTION_TYPES = 5;
 
     // ---------------------------------
     // Offsets for AgreementData.boolValues
@@ -346,6 +346,17 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
         return party == B;
     }
 
+    // Test whether res1 and res2 are compatible, given that res1 is given by party res1Party..
+    // Compatible means that they don't disagree in a selfish direction. 
+    // Assumes that res1 and res2 are not RESOLUTION_NULL
+    function resolutionsAreCompatible(uint res1, uint res2, uint res1Party) internal pure returns (bool){
+        if(res1Party == A){
+            return res1 <= res2;
+        } else{
+            return res1 >= res2;
+        }
+    }
+
     // Safely create a dispute using the ERC792 standard. The call to the external function 'createDispute' is untrusted,
     // so we need to wrap it in a reentrancy guard.
     // We tell the arbitation service how many choices it has and send extraData to tell it details about how the arbitration
@@ -444,6 +455,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
         }
         
         // Beyond this point we know that both parties paid the full arbitration fee.
+        // This implies they've also both resolved.
 
         // If the arbitrator didn't resolve or withdraw, that means they weren't paid. 
         // And they can never be paid, because we'll only call this function after a final resolution
@@ -456,10 +468,10 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
         // the full arbitration fee. So party A and party B only have a single arbitration fee to split
         // between themselves. We need to figure out how to split up that fee.
         
-        // If A and B have the same resolution, then whichever of them resolved to this value the latest 
-        // should have to pay the full fee (because if they had resolved to it earlier, the arbitrator would
+        // If A and B have compatible resolutions, then whichever of them resolved latest 
+        // should have to pay the full fee (because if they had resolved earlier, the arbitrator would
         // never have had to be called). See comments for PARTY_A_RESOLVED_LAST
-        if(agreement.partyAResolution == agreement.partyBResolution){
+        if(resolutionsAreCompatible(agreement.partyAResolution, agreement.partyBResolution, A)){ 
             if(partyResolvedLast(agreement, party)){
                 return 0;
             }else{
@@ -467,16 +479,16 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
             }
         }
 
-        // Beyond this point we know A and B's resolutions are different. If either of them
+        // Beyond this point we know A and B's resolutions are incompatible. If either of them
         // agree with the arbiter they should get a refund, leaving the other person with nothing.
-        if(partyResolution(agreement, party) == agreement.resolution){
+        if(resolutionsAreCompatible(partyResolution(agreement, party), agreement.resolution, party)){
             return agreement.disputeFee;
         }
-        if(partyResolution(agreement, otherParty) == agreement.resolution){
+        if(resolutionsAreCompatible(partyResolution(agreement, otherParty), agreement.resolution, otherParty)){
             return 0;
         }
 
-        // A and B's resolutions are different but unequal to the overall resolution. 
+        // A and B's resolutions are different but both incompatible with the overall resolution. 
         // Neither party was "right", so they can both split the dispute fee.
         return agreement.disputeFee/2;
     }
@@ -500,10 +512,10 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
         // Beyond this point we know the arbitrator has been paid. So party A and party B only have a single arbitration 
         // fee to split between themselves. We need to figure out how to split up that fee.
         
-        // If A and B have the same resolution, then whichever of them resolved to this value the latest 
+        // If A and B have a compatible resolution, then whichever of them resolved to this value the latest 
         // should have to pay the full fee (because if they had resolved to it earlier, the arbitrator would
         // never have had to be called). See comments for PARTY_A_RESOLVED_LAST
-        if(agreement.partyAResolution == agreement.partyBResolution){
+        if(resolutionsAreCompatible(agreement.partyAResolution, agreement.partyBResolution, A)){
             if(partyResolvedLast(agreement, party)){
                 return sub(arbData.weiPaidIn[party], arbData.weiPaidToArbitrator);
             }else{
@@ -511,12 +523,12 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
             }
         }
         
-        // Beyond this point we know A and B's resolutions are different. If either of them
+        // Beyond this point we know A and B's resolutions are incompatible. If either of them
         // agree with the arbiter they should get a refund, leaving the other person with nothing.
-        if(partyResolution(agreement, party) == agreement.resolution){
+        if(resolutionsAreCompatible(partyResolution(agreement, party), agreement.resolution, party)){
             return arbData.weiPaidIn[party]; 
         }
-        if(partyResolution(agreement, otherParty) == agreement.resolution){
+        if(resolutionsAreCompatible(partyResolution(agreement, otherParty), agreement.resolution, otherParty)){
             return sub(arbData.weiPaidIn[party], arbData.weiPaidToArbitrator); 
         }
 
@@ -525,19 +537,30 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
         return sub(arbData.weiPaidIn[party], arbData.weiPaidToArbitrator/2);
     }
 
+    // ---------------------------------
+    // -------- constructor
+    // --------------------------------
+
+    constructor() public {
+        // We don't want agreementID 0 to be valid, since the map of disputeIDs to agreementIDs will map
+        // to 0 if the dispute ID doesn't exist.
+        AgreementData memory dummyAgreement;
+        agreements.push(dummyAgreement);
+    }
+
     // ------------------------------------------------------------------
-    // public getter functions 
+    // --------------- getter functions 
     // -----------------------------------------------------------------
 
-    function getResolutionNull() public pure returns (uint){
+    function getResolutionNull() external pure returns (uint){
         return resolutionToWei(RESOLUTION_NULL);
     }
-    function getNumberOfAgreements() public view returns (uint){
+    function getNumberOfAgreements() external view returns (uint){
         return agreements.length;
     }
 
     // Return a bunch of arrays representing the entire state of the agreement. 
-    function getState(uint agreementID) public view returns (
+    function getState(uint agreementID) external view returns (
         address[3] memory, 
         uint[16] memory, 
         bool[11] memory,
@@ -590,15 +613,8 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     }
 
     // ----------------------------------------------------------------------
-    // -------- public functions --------------------------------------------
+    // -------- main external/public functions ------------------------------
     // ----------------------------------------------------------------------
-
-    constructor() public {
-        // We don't want agreementID 0 to be valid, since the map of disputeIDs to agreementIDs will map
-        // to 0 if the dispute ID doesn't exist.
-        AgreementData memory dummyAgreement;
-        agreements.push(dummyAgreement);
-    }
 
     // Adds a new agreement to the agreements array, returns the agreementID.
     // This is only callable by partyA. So the caller needs to rearrange addresses so that they're partyA.
@@ -624,11 +640,11 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // arbExtraData: Data to pass in to ERC792 arbitrator if a dispute is ever created. 
     function createAgreementA(
         bytes32 agreementHash, 
-        string memory agreementURI,
-        address[3] memory participants, 
-        uint[9] memory quantities, 
+        string calldata agreementURI,
+        address[3] calldata participants, 
+        uint[9] calldata quantities, 
         uint flags, 
-        bytes memory arbExtraData) public payable returns (uint) {
+        bytes calldata arbExtraData) external payable returns (uint) {
 
         require(msg.sender == participants[0], "Only party A can call createAgreementA.");
         require(msg.value == add(quantities[0], quantities[2]), "Payment not correct.");
@@ -683,7 +699,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
 
     // Called by PartyB to deposit their stake, locking in the agreement.
     // PartyA already deposited funds in createAgreementA, so we only need a deposit function for partyB.
-    function depositB(uint agreementID) public payable onlyOpen(agreementID) {
+    function depositB(uint agreementID) external payable onlyOpen(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(msg.sender == agreement.partyBAddress, "Function can only be called by party B.");
@@ -701,7 +717,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // Called to report a resolution of the agreement by a party. 
     // resolutionWei is the amount of wei that the caller thinks should go to party A.
     // The remaining amount of wei staked for this agreement would go to party B.
-    function resolveAsParty(uint agreementID, uint resolutionWei) public onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function resolveAsParty(uint agreementID, uint resolutionWei) external onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on.");
@@ -720,20 +736,20 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
 
         setPartyResolution(agreement, party, res);
 
-        // If A and B's resolutions are the same, set the official resolution to this value.
-        // Or set the resolution to the caller's preference if they give all funds to
-        // the other person. 
-        if(res == partyResolution(agreement, otherParty) && res != RESOLUTION_NULL ||
-            party == A && res == 0 ||
-            party == B && res == add(agreement.partyAStakeAmount, agreement.partyBStakeAmount)){
-
+        // Set the official resolution if one party wants to give the other at least as much as
+        // they requested, or at least as much as the most they could request (if they haven't resolved yet).
+        uint otherRes = partyResolution(agreement, otherParty);
+        if((otherRes != RESOLUTION_NULL && resolutionsAreCompatible(res, otherRes, party)) ||
+            (party == A && res == 0) ||
+            (party == B && res == add(agreement.partyAStakeAmount, agreement.partyBStakeAmount))){
+            
             agreement.resolution = res;
         }
     }
 
     // Called by arbitrator to report their resolution. See resolveAsParty comments for resolution interpretation.
     // Can only be called after arbitrator is asked to arbitrate by both parties.
-    function resolveAsArbitrator(uint agreementID, uint resolutionWei) public onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function resolveAsArbitrator(uint agreementID, uint resolutionWei) external onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         uint48 res = toMillionth(resolutionWei);
@@ -764,7 +780,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
         ArbitrationData storage arbData = arbitrationDataForAgreement[agreementID];
 
         require(arbData.disputeCreated, "Arbitration not requested.");
-        require(ruling <= nStandardResolutionTypes, "Ruling out of range.");
+        require(ruling <= NUM_STANDARD_RESOLUTION_TYPES, "Ruling out of range.");
         
         setArbitratorResolved(agreement, true);
 
@@ -794,7 +810,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // If A calls createAgreementA but B is delaying in calling depositB, A can get their funds back 
     // by calling earlyWithdrawA. This closes the agreement to further deposits. A or B would have to
     // call createAgreementA again if they still wanted to do an agreement.
-    function earlyWithdrawA(uint agreementID) public onlyOpen(agreementID) {
+    function earlyWithdrawA(uint agreementID) external onlyOpen(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(msg.sender == agreement.partyAAddress, "withdrawA can only be called by party A.");
@@ -808,7 +824,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
 
     // This can only be called after a resolution is established (enforced by onlyClosed and onlyLockedIn)
     // Each party calls this to withdraw the funds they're entitled to, based on the resolution.
-    function withdraw(uint agreementID) public onlyClosed(agreementID) onlyLockedIn(agreementID) {
+    function withdraw(uint agreementID) external onlyClosed(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on");
@@ -840,7 +856,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // Request 'simple' (non- ERC792) arbitration. Both parties must call this (and pay the required fee) before
     // the arbitrator is allowed to rule. If one party calls this and the other refuses to, the party who called
     // this function can eventually call requestDefaultJudgment. 
-    function requestArbitration(uint agreementID) public payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function requestArbitration(uint agreementID) external payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         uint party = getParty(agreement);
@@ -848,6 +864,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
         bool firstArbitrationRequest = !partyRequestedArbitration(agreement, A) && !partyRequestedArbitration(agreement, B);
 
         require(!usingArbitrationStandard(agreement), "Only simple arbitration uses requestArbitration.");
+        require(agreement.arbitratorAddress != address(0), "Arbitration is disallowed.");
         require(msg.value == toWei(agreement.disputeFee), "Arbitration fee amount was incorrect.");
         require(RESOLUTION_NULL != partyResolution(agreement, party), "Need to enter a resolution before requesting arbitration.");
         require(!partyRequestedArbitration(agreement, party), "This party already requested arbitration.");
@@ -867,11 +884,12 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // The logic of this function is somewhat tricky, because fees can rise in between the time that the two parties call
     // this. Both parties must call this before the arbitrator is allowed to rule.
     // We allow parties to overpay this fee if they like, to be ready for any possible fee increases.
-    function requestStandardArbitration(uint agreementID) public payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function requestStandardArbitration(uint agreementID) external payable onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on");
         require(usingArbitrationStandard(agreement), "Only standard arbitration uses requestStandardArbitration.");
+        require(agreement.arbitratorAddress != address(0), "Arbitration is disallowed.");
 
         (uint party, uint otherParty) = getParties(agreement);
         
@@ -898,7 +916,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
             // Both parties have paid at least the arbitrationFee, so create a dispute.
             arbData.disputeCreated = true;
             arbData.weiPaidToArbitrator = arbitrationFee;
-            arbData.disputeID = createDispute_Untrusted(agreement, nStandardResolutionTypes,
+            arbData.disputeID = createDispute_Untrusted(agreement, NUM_STANDARD_RESOLUTION_TYPES,
                 arbitrationExtraData[agreementID], arbitrationFee);
             disputeToAgremeentID[agreement.arbitratorAddress][arbData.disputeID] = agreementID;
             emit Dispute(Arbitrator(agreement.arbitratorAddress), arbData.disputeID, agreementID);
@@ -919,13 +937,13 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // Allow the arbitrator to indicate they're working on the dispute by withdrawing the funds.
     // We can't prevent dishonest arbitrator from taking funds without doing work, because they can
     // always call 'rule' quickly. So just avoid the case where we send funds to a nonresponsive arbitrator.
-    function withdrawDisputeFee(uint agreementID) public onlyLockedIn(agreementID) {
+    function withdrawDisputeFee(uint agreementID) external onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(!usingArbitrationStandard(agreement), "Only simple arbitration uses withdrawDisputeFee.");
         require(partyRequestedArbitration(agreement, A) && partyRequestedArbitration(agreement, B), "Arbitration not requested");
         require(msg.sender == agreement.arbitratorAddress, "withdrawDisputeFee can only be called by Arbitrator.");
-        require(agreement.partyAResolution != agreement.partyBResolution || agreement.partyAResolution == RESOLUTION_NULL, 
+        require(!resolutionsAreCompatible(agreement.partyAResolution, agreement.partyBResolution, A), 
             "partyA and partyB already resolved their dispute.");
         require(!arbitratorWithdrewDisputeFee(agreement), "Already withdrew dispute fee.");
 
@@ -936,7 +954,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
 
     // If the other person hasn't paid their arbitration fee in time, this function allows the caller to cause 
     // the agreement to be resolved in their favor without the arbitrator getting involved. 
-    function requestDefaultJudgment(uint agreementID) public onlyOpen(agreementID) onlyLockedIn(agreementID) {
+    function requestDefaultJudgment(uint agreementID) external onlyOpen(agreementID) onlyLockedIn(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
         
         require(!preventReentrancy(agreement), "Reentrancy protection is on");
@@ -955,7 +973,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
 
     // If enough time has elapsed, either party can trigger auto-resolution (if it's enabled) by calling this function,
     // provided that neither party has requested arbitration yet.
-    function requestAutomaticResolution(uint agreementID) public onlyOpen(agreementID) onlyLockedIn(agreementID) { 
+    function requestAutomaticResolution(uint agreementID) external onlyOpen(agreementID) onlyLockedIn(agreementID) { 
         AgreementData storage agreement = agreements[agreementID];
 
         require(!preventReentrancy(agreement), "Reentrancy protection is on.");
@@ -970,7 +988,7 @@ contract AgreementManager is SafeUtils, Arbitrable, EvidenceProducer{
     // Allows either party to record evidence on the blockchain, in case off-chain communication breaks down.
     // If we're using the ERC792 arbitration standard, parties can only submit evidence during a dispute.
     // If we're using simple arbitration, parties can submit evidence whenever.
-    function submitEvidence(uint agreementID, string memory evidence) public onlyOpen(agreementID) {
+    function submitEvidence(uint agreementID, string calldata evidence) external onlyOpen(agreementID) {
         AgreementData storage agreement = agreements[agreementID];
 
         require(msg.sender == agreement.partyAAddress || msg.sender == agreement.partyBAddress, "Unauthorized sender.");
